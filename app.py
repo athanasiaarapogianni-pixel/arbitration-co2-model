@@ -10,7 +10,7 @@ st.title("⚖️ Arbitration Carbon Impact Model")
 @st.cache_data
 def load_excel():
     # This reads your specific Excel file
-    return pd.ExcelFile("Carbon Impact Model Mar26 (1).xlsx")
+    return pd.ExcelFile("Carbon_model.xlsx")
 
 excel = load_excel()
 
