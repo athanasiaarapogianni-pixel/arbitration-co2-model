@@ -11,7 +11,6 @@ FACTORS = {
     "email_large": 0.05,
     "hotel": {3: 15.5, 4: 21.7, 5: 35.2}, 
     "data_gb": 0.021,
-    "printing_page": 0.005,
     "materials": {"notebook": 0.37, "pen": 0.05, "cup": 0.018},
     "transport": {
         "Plane (Business)": 0.274,
@@ -26,7 +25,7 @@ CITIES = ["Munich", "Madrid", "London", "Milan", "Frankfurt", "Paris", "Warsaw",
 
 def get_dist(origin, destination):
     if origin == destination: return 0
-    return 850 # Placeholder average
+    return 850 
 
 # --- 2. USER INTERFACE ---
 st.title("⚖️ Professional Arbitration Carbon Impact Model")
@@ -34,6 +33,7 @@ st.title("⚖️ Professional Arbitration Carbon Impact Model")
 with st.sidebar:
     st.header("🌍 Global Case Parameters")
     case_months = st.number_input("Arbitration Duration (Months)", value=24)
+    total_data = st.number_input("Total Data Generated (GB)", value=10)
     is_virtual = st.toggle("Virtual Hearing", value=False)
     
     if not is_virtual:
@@ -53,87 +53,94 @@ def subteam_inputs(label, prefix):
     stars = c4.selectbox("Hotel", [3, 4, 5], index=1, key=f"{prefix}_st")
     return {"size": size, "city": city, "mode": mode, "stars": stars}
 
-# --- PILLAR 1: CLAIMANT ---
+def meeting_inputs(label, prefix):
+    st.markdown(f"**Meetings at {label} Location**")
+    col1, col2 = st.columns(2)
+    m_count = col1.number_input("Number of Meetings", value=1 if "Claimant" in label else 0, key=f"{prefix}_mc")
+    m_days = col2.number_input("Total Days (Sum)", value=3 if "Claimant" in label else 0, key=f"{prefix}_md")
+    return {"count": m_count, "days": m_days}
+
+# --- UI PILLARS ---
 with tab_claimant:
-    st.subheader("Team Composition")
     c_cli = subteam_inputs("Client Team", "c_cli")
     c_cou = subteam_inputs("Legal Counsel", "c_cou")
     c_exp = subteam_inputs("Experts", "c_exp")
-    
     st.divider()
-    st.subheader("Digital Activity (Scope 3)")
-    col1, col2, col3 = st.columns(3)
-    c_emails = col1.number_input("Emails (Total)", value=5000, key="c_emails")
-    c_printing = col2.number_input("Pages Printed", value=1000, key="c_print")
-    c_data = col3.number_input("Data Share (GB)", value=5, key="c_data")
+    c_meet_cli = meeting_inputs("Claimant Office", "c_m_cli")
+    c_meet_cou = meeting_inputs("Counsel Chambers", "c_m_cou")
+    c_meet_exp = meeting_inputs("Expert Office", "c_m_exp")
 
-# --- PILLAR 2 & 3 (Respondent/Tribunal placeholders as per your code) ---
-# [Keep your existing UI code for Respondent and Tribunal tabs here]
+with tab_respondent:
+    r_cli = subteam_inputs("Client Team", "r_cli")
+    r_cou = subteam_inputs("Legal Counsel", "r_cou")
+    r_exp = subteam_inputs("Experts", "r_exp")
+    st.divider()
+    r_meet_cli = meeting_inputs("Respondent Office", "r_m_cli")
+    r_meet_cou = meeting_inputs("Counsel Chambers", "r_m_cou")
+    r_meet_exp = meeting_inputs("Expert Office", "r_m_exp")
 
-# --- 3. CALCULATION & EXCEL MAPPING ---
-def run_calculations():
-    # A. Calculate Digital Emissions (Scope 2 & 3)
-    # Mapping to C30 (Email), C31 (Computer), C32 (Data)
-    email_emissions = c_emails * FACTORS['email_std']
-    comp_emissions = (c_cli['size'] + c_cou['size'] + c_exp['size']) * case_months * FACTORS['comp_month']
-    data_emissions = c_data * FACTORS['data_gb']
+with tab_tribunal:
+    arb1 = subteam_inputs("Arbitrator 1", "t_a1")
+    arb2 = subteam_inputs("Arbitrator 2", "t_a2")
+    arb3 = subteam_inputs("Arbitrator 3", "t_a3")
 
-    # B. Calculate Travel (Claimant Site Visits)
-    # We create a list for the 3 sets (Client, Counsel, Expert locations)
-    # Target: C40-C42, C44-C46, C48-C50
-    claimant_site_trips = []
-    teams = [c_cli, c_cou, c_exp]
-    for i, t in enumerate(teams):
-        # Calculation for travel/stay at this specific sub-team's location
-        # This is the logic for C40-C42, C44-C46, etc.
-        trip_travel = get_dist(t['city'], "Meeting Location") * 2 * t['size'] * FACTORS['transport'][t['mode']]
-        trip_hotel = t['size'] * 3 * FACTORS['hotel'][t['stars']] # Assumes 3 days avg
-        claimant_site_trips.append({"travel": trip_travel, "hotel": trip_hotel, "misc": 5.0})
+# --- 3. CALCULATION ENGINE ---
+def calculate_party(party_name, teams, meetings, data_share):
+    res = {
+        "Scope 2: Computer Use": sum(t['size'] for t in teams) * case_months * FACTORS['comp_month'] * 0.15,
+        "Scope 3: Data Storage": data_share * FACTORS['data_gb'],
+        "Scope 3: Computer (Mfg/Ops)": sum(t['size'] for t in teams) * case_months * FACTORS['comp_month'] * 0.85,
+        "Scope 3: Travel": 0,
+        "Scope 3: Hotel Stays": 0,
+        "Scope 3: Material Use": sum(t['size'] for t in teams) * (FACTORS['materials']['notebook'] + FACTORS['materials']['pen'])
+    }
 
-    # C. Calculate Hearing Emissions (C52-C55)
-    h_travel = 0
-    h_hotel = 0
+    # A. Hearing Travel & Hotel
     if not is_virtual:
         for t in teams:
-            h_travel += get_dist(t['city'], h_city) * 2 * t['size'] * FACTORS['transport'][t['mode']]
-            h_hotel += t['size'] * h_days * FACTORS['hotel'][t['stars']]
+            dist = get_dist(t['city'], h_city)
+            res["Scope 3: Travel"] += dist * 2 * t['size'] * FACTORS['transport'][t['mode']]
+            res["Scope 3: Hotel Stays"] += t['size'] * h_days * FACTORS['hotel'][t['stars']]
 
-    # D. WRITE TO EXCEL
+    # B. Prep Meetings (Claimant & Respondent)
+    if meetings:
+        loc_cities = [teams[0]['city'], teams[1]['city'], teams[2]['city']]
+        for i, m in enumerate(meetings):
+            if m['count'] > 0:
+                target_city = loc_cities[i]
+                for j, t in enumerate(teams):
+                    if i != j:
+                        dist = get_dist(t['city'], target_city)
+                        res["Scope 3: Travel"] += dist * 2 * m['count'] * t['size'] * FACTORS['transport'][t['mode']]
+                        res["Scope 3: Hotel Stays"] += t['size'] * m['days'] * FACTORS['hotel'][t['stars']]
+    return res
+
+# Run Calculations
+c_res = calculate_party("Claimant", [c_cli, c_cou, c_exp], [c_meet_cli, c_meet_cou, c_meet_exp], total_data * 0.4)
+r_res = calculate_party("Respondent", [r_cli, r_cou, r_exp], [r_meet_cli, r_meet_cou, r_meet_exp], total_data * 0.4)
+t_res = calculate_party("Tribunal", [arb1, arb2, arb3], None, total_data * 0.2)
+
+# --- 4. EXCEL EXPORT LOGIC ---
+if st.button("Update Excel Template (Cells C30-C55)"):
     try:
         wb = openpyxl.load_workbook('arbitration_tool.xlsx')
         sheet = wb.active
+        
+        # Digital Footprint
+        sheet['C31'] = c_res["Scope 2: Computer Use"] + c_res["Scope 3: Computer (Mfg/Ops)"]
+        sheet['C32'] = c_res["Scope 3: Data Storage"]
 
-        # Scope 3 Digital
-        sheet['C30'] = email_emissions
-        sheet['C31'] = comp_emissions
-        sheet['C32'] = data_emissions
-
-        # Claimant Side Site Travels
-        # Set 1 (C40-C42)
-        sheet['C40'] = claimant_site_trips[0]['travel']
-        sheet['C41'] = claimant_site_trips[0]['hotel']
-        sheet['C42'] = claimant_site_trips[0]['misc']
-
-        # Set 2 (C44-C46)
-        sheet['C44'] = claimant_site_trips[1]['travel']
-        sheet['C45'] = claimant_site_trips[1]['hotel']
-        sheet['C46'] = claimant_site_trips[1]['misc']
-
-        # Set 3 (C48-C50)
-        sheet['C48'] = claimant_site_trips[2]['travel']
-        sheet['C49'] = claimant_site_trips[2]['hotel']
-        sheet['C50'] = claimant_site_trips[2]['misc']
+        # Claimant Side Travel & Hotel Mapping (C40-C50)
+        # Using placeholder breakdown for the three meeting locations
+        sheet['C40'], sheet['C41'] = c_res["Scope 3: Travel"]*0.3, c_res["Scope 3: Hotel Stays"]*0.3
+        sheet['C44'], sheet['C45'] = c_res["Scope 3: Travel"]*0.3, c_res["Scope 3: Hotel Stays"]*0.3
+        sheet['C48'], sheet['C49'] = c_res["Scope 3: Travel"]*0.4, c_res["Scope 3: Hotel Stays"]*0.4
 
         # Hearing Location (C52-C55)
-        sheet['C52'] = h_travel
-        sheet['C53'] = h_hotel
-        sheet['C54'] = 10.0 # Local Transport Placeholder
-        sheet['C55'] = 25.0 # Meals/Misc Placeholder
+        if not is_virtual:
+            sheet['C52'] = sum(get_dist(t['city'], h_city) * 2 * t['size'] * FACTORS['transport'][t['mode']] for t in [c_cli, c_cou, c_exp])
+            sheet['C53'] = sum(t['size'] * h_days * FACTORS['hotel'][t['stars']] for t in [c_cli, c_cou, c_exp])
 
-        wb.save('Arbitration_Model_Results.xlsx')
-        st.success("Excel updated and saved as 'Arbitration_Model_Results.xlsx'")
-    except FileNotFoundError:
-        st.error("Template 'arbitration_tool.xlsx' not found.")
-
-if st.button("Update Excel Report"):
-    run_calculations()
+        wb.save('Arbitration_Report_Updated.xlsx')
+        st.success("Successfully updated Arbitration_Report_Updated.xlsx")
+    except Exception as e:
