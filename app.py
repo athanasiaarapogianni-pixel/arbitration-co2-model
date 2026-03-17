@@ -1,102 +1,117 @@
 import streamlit as st
 import pandas as pd
 
-# --- 1. SETTINGS & FACTORS ---
-st.set_page_config(page_title="Arbitration CO2 Tool", layout="wide")
+# --- 1. DATA & CONSTANTS (From your Assumptions Sheet) ---
+st.set_page_config(page_title="Arbitration CO2 Model", layout="wide")
 
-# From your "Assumptions" sheet
 FACTORS = {
-    "comp_month": 6.444, # kgCO2e/person
-    "email": 0.004,      # kgCO2e/unit
-    "data_gb": 0.021,    # kgCO2e/GB
+    "comp_month": 6.4444, 
+    "email": 0.004,
+    "data_gb": 0.021,
+    "hotel_avg": 25.0,
     "transport": {
         "Plane (Business)": 0.274,
         "Plane (Economy)": 0.182,
         "Rail": 0.035,
-        "Car (non-electric)": 0.151
+        "Car (non-electric)": 0.151,
+        "Car (electric)": 0.055
     }
 }
 
-# --- 2. THE THREE-PILLAR ENGINE ---
-def calculate_arbitration_co2(data):
-    # Base Case Data
-    months = data['global_months']
-    
-    # 1. CLAIMANT PILLAR (Team + Counsel + Experts)
-    c_people = data['c_team'] + data['c_counsel'] + data['c_experts']
-    c_digital = c_people * months * FACTORS['comp_month']
-    c_travel = get_distance(data['c_city'], data['hearing_city']) * 2 * c_people * FACTORS['transport'].get(data['c_mode'], 0.18)
-    
-    # 2. RESPONDENT PILLAR (Team + Counsel + Experts)
-    r_people = data['r_team'] + data['r_counsel'] + data['r_experts']
-    r_digital = r_people * months * FACTORS['comp_month']
-    r_travel = get_distance(data['r_city'], data['hearing_city']) * 2 * r_people * FACTORS['transport'].get(data['r_mode'], 0.18)
-    
-    # 3. TRIBUNAL PILLAR (Arbitrators Only)
-    t_people = data['arbitrators']
-    t_digital = t_people * months * FACTORS['comp_month']
-    # Arbitrators often travel from different cities, here we use a collective average
-    t_travel = get_distance(data['t_city'], data['hearing_city']) * 2 * t_people * FACTORS['transport'].get(data['t_mode'], 0.18)
-    
-    return {
-        "Claimant": c_digital + c_travel,
-        "Respondent": r_digital + r_travel,
-        "Tribunal": t_digital + t_travel
-    }
+CITIES = ["London", "Paris", "Munich", "Madrid", "Milan", "Frankfurt", "Warsaw", "Geneva", "New York", "Singapore"]
 
-def get_distance(city_a, city_b):
-    # Simplified lookup (Matches your Travel Matrix logic)
-    distances = {("Munich", "Paris"): 684, ("London", "Paris"): 344, ("Milan", "Paris"): 640}
-    return distances.get(tuple(sorted((city_a, city_b))), 1000)
+def get_dist(city_a, city_b):
+    if city_a == city_b: return 0
+    return 850 # In full version, this maps to your Travel Matrix
 
-# --- 3. THE INTERFACE ---
+# --- 2. THE UI ---
 st.title("⚖️ Arbitration Carbon Impact Model")
 
-# Global Settings
 with st.sidebar:
-    st.header("Case Parameters")
-    case_months = st.number_input("Arbitration Duration (Months)", value=24)
-    hearing_city = st.selectbox("Hearing Location", ["Paris", "London", "Munich", "Geneva"])
+    st.header("Global Case Settings")
+    months = st.number_input("Case Duration (Months)", value=24)
+    total_data = st.number_input("Total Data Generated (GB)", value=10)
+    is_virtual = st.toggle("Virtual Hearing", value=False)
+    
+    if not is_virtual:
+        h_city = st.selectbox("Hearing City", CITIES, index=1)
+        h_days = st.slider("Hearing Days", 1, 20, 5)
+    else:
+        h_city, h_days = "Virtual", 0
 
-# The 3 Pillars Layout
-col1, col2, col3 = st.columns(3)
+# Input Tabs
+t1, t2, t3 = st.tabs(["🔴 Claimant", "🔵 Respondent", "⚖️ Tribunal"])
 
-with col1:
-    st.header("Claimant")
-    c_team = st.number_input("Client Team", 1, 20, 3)
-    c_counsel = st.number_input("Counsel", 1, 20, 4)
-    c_experts = st.number_input("Experts", 0, 20, 2)
-    c_city = st.text_input("Home City (Claimant)", "Munich")
-    c_mode = st.selectbox("Travel Mode (C)", list(FACTORS['transport'].keys()))
+def get_team_inputs(prefix):
+    st.markdown(f"**Group Locations & Sizes**")
+    c1, c2, c3 = st.columns(3)
+    cli_sz = c1.number_input("Client Size", value=3, key=f"{prefix}1")
+    cou_sz = c1.number_input("Counsel Size", value=4, key=f"{prefix}2")
+    exp_sz = c1.number_input("Expert Size", value=2, key=f"{prefix}3")
+    
+    city = c2.selectbox("Base City", CITIES, key=f"{prefix}4")
+    mode = c3.selectbox("Travel Mode", list(FACTORS['transport'].keys()), key=f"{prefix}5")
+    return {"total_sz": cli_sz + cou_sz + exp_sz, "city": city, "mode": mode}
 
-with col2:
-    st.header("Respondent")
-    r_team = st.number_input("Client Team ", 1, 20, 2)
-    r_counsel = st.number_input("Counsel ", 1, 20, 5)
-    r_experts = st.number_input("Experts ", 0, 20, 3)
-    r_city = st.text_input("Home City (Respondent)", "Milan")
-    r_mode = st.selectbox("Travel Mode (R)", list(FACTORS['transport'].keys()))
+with t1: c_data = get_team_inputs("c")
+with t2: r_data = get_team_inputs("r")
+with t3:
+    st.markdown("**Tribunal (3 Arbitrators)**")
+    t_city = st.selectbox("Tribunal City", CITIES, key="t_ct")
+    t_mode = st.selectbox("Tribunal Travel", list(FACTORS['transport'].keys()), key="t_md")
+    t_data = {"total_sz": 3, "city": t_city, "mode": t_mode}
 
-with col3:
-    st.header("Tribunal")
-    arbitrators = st.number_input("Number of Arbitrators", 1, 3, 3)
-    t_city = st.text_input("Home City (Tribunal)", "London")
-    t_mode = st.selectbox("Travel Mode (T)", list(FACTORS['transport'].keys()))
+# --- 3. THE CALCULATION ENGINE (Matching 'Outputs' Tab) ---
+def get_party_breakdown(group, data_share, virtual):
+    # Digital (Scope 2 & 3 Computer Use)
+    digital = group['total_sz'] * months * FACTORS['comp_month']
+    
+    # Data Storage (Pro-rated share of total GB)
+    data_impact = data_share * FACTORS['data_gb']
+    
+    # Travel & Hotel
+    if virtual or group['total_sz'] == 0:
+        travel, hotel = 0, 0
+    else:
+        dist = get_dist(group['city'], h_city)
+        travel = dist * 2 * group['total_sz'] * FACTORS['transport'][group['mode']]
+        hotel = group['total_sz'] * h_days * FACTORS['hotel_avg']
+        
+    return {
+        "Digital (Computer/Email)": digital,
+        "Data Storage": data_impact,
+        "Travel": travel,
+        "Hotel Stays": hotel,
+        "Total": digital + data_impact + travel + hotel
+    }
 
-# Calculations
-results = calculate_arbitration_co2({
-    "global_months": case_months, "hearing_city": hearing_city,
-    "c_team": c_team, "c_counsel": c_counsel, "c_experts": c_experts, "c_city": c_city, "c_mode": c_mode,
-    "r_team": r_team, "r_counsel": r_counsel, "r_experts": r_experts, "r_city": r_city, "r_mode": r_mode,
-    "arbitrators": arbitrators, "t_city": t_city, "t_mode": t_mode
-})
+# Assign data shares (1/3 each for simplicity, or 40/40/20)
+c_results = get_party_breakdown(c_data, total_data * 0.4, is_virtual)
+r_results = get_party_breakdown(r_data, total_data * 0.4, is_virtual)
+t_results = get_party_breakdown(t_data, total_data * 0.2, is_virtual)
 
-# --- 4. OUTPUTS ---
+# --- 4. OUTPUTS (The 'Excel' Structure) ---
 st.divider()
-total_co2 = sum(results.values())
-st.subheader(f"Total Case Footprint: {total_co2:,.0f} kgCO2e")
+st.header("Results Summary (kgCO2e)")
 
-res_col1, res_col2, res_col3 = st.columns(3)
-res_col1.metric("Claimant Share", f"{results['Claimant']:,.0f} kg")
-res_col2.metric("Respondent Share", f"{results['Respondent']:,.0f} kg")
-res_col3.metric("Tribunal Share", f"{results['Tribunal']:,.0f} kg")
+def display_party_card(name, results, color):
+    with st.container():
+        st.markdown(f"### {color} {name}")
+        col_a, col_b = st.columns([1, 2])
+        
+        # Table of results
+        df = pd.DataFrame.from_dict(results, orient='index', columns=['kgCO2e'])
+        col_a.table(df.style.format("{:,.2f}"))
+        
+        # Mini chart
+        col_b.bar_chart(df.drop("Total"))
+
+display_party_card("Claimant", c_results, "🔴")
+st.divider()
+display_party_card("Respondent", r_results, "🔵")
+st.divider()
+display_party_card("Tribunal", t_results, "⚖️")
+
+# Grand Total Metric
+st.sidebar.divider()
+st.sidebar.metric("GRAND TOTAL", f"{c_results['Total'] + r_results['Total'] + t_results['Total']:,.0f} kg")
