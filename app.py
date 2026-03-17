@@ -27,9 +27,7 @@ def get_dist(origin, destination):
     if origin == destination: return 0
     return 850 
 
-# --- 2. USER INTERFACE ---
-st.title("⚖️ Professional Arbitration Carbon Impact Model")
-
+# --- 2. SIDEBAR PARAMETERS ---
 with st.sidebar:
     st.header("🌍 Global Case Parameters")
     case_months = st.number_input("Arbitration Duration (Months)", value=24)
@@ -41,7 +39,13 @@ with st.sidebar:
         h_days = st.slider("Hearing Duration (Days)", 1, 21, 5)
     else:
         h_city, h_days = "Virtual", 0
+    
+    st.divider()
+    st.info("Complete all tabs, then click below to export:")
+    export_btn = st.button("💾 Update Excel Template (C30-C55)")
 
+# --- 3. UI TABS ---
+st.title("⚖️ Professional Arbitration Carbon Impact Model")
 tab_claimant, tab_respondent, tab_tribunal = st.tabs(["🔴 Claimant", "🔵 Respondent", "⚖️ Tribunal"])
 
 def subteam_inputs(label, prefix):
@@ -60,7 +64,6 @@ def meeting_inputs(label, prefix):
     m_days = col2.number_input("Total Days (Sum)", value=3 if "Claimant" in label else 0, key=f"{prefix}_md")
     return {"count": m_count, "days": m_days}
 
-# --- UI PILLARS ---
 with tab_claimant:
     c_cli = subteam_inputs("Client Team", "c_cli")
     c_cou = subteam_inputs("Legal Counsel", "c_cou")
@@ -84,63 +87,74 @@ with tab_tribunal:
     arb2 = subteam_inputs("Arbitrator 2", "t_a2")
     arb3 = subteam_inputs("Arbitrator 3", "t_a3")
 
-# --- 3. CALCULATION ENGINE ---
-def calculate_party(party_name, teams, meetings, data_share):
+# --- 4. CALCULATION ENGINE ---
+def calculate_party(teams, meetings, data_share):
     res = {
-        "Scope 2: Computer Use": sum(t['size'] for t in teams) * case_months * FACTORS['comp_month'] * 0.15,
-        "Scope 3: Data Storage": data_share * FACTORS['data_gb'],
-        "Scope 3: Computer (Mfg/Ops)": sum(t['size'] for t in teams) * case_months * FACTORS['comp_month'] * 0.85,
-        "Scope 3: Travel": 0,
-        "Scope 3: Hotel Stays": 0,
-        "Scope 3: Material Use": sum(t['size'] for t in teams) * (FACTORS['materials']['notebook'] + FACTORS['materials']['pen'])
+        "Digital (Comp/Data)": (sum(t['size'] for t in teams) * case_months * FACTORS['comp_month']) + (data_share * FACTORS['data_gb']),
+        "Travel (Prep & Hearing)": 0,
+        "Hotel Stays": 0,
+        "Materials": sum(t['size'] for t in teams) * (FACTORS['materials']['notebook'] + FACTORS['materials']['pen'])
     }
-
-    # A. Hearing Travel & Hotel
+    # Hearing travel
     if not is_virtual:
         for t in teams:
-            dist = get_dist(t['city'], h_city)
-            res["Scope 3: Travel"] += dist * 2 * t['size'] * FACTORS['transport'][t['mode']]
-            res["Scope 3: Hotel Stays"] += t['size'] * h_days * FACTORS['hotel'][t['stars']]
-
-    # B. Prep Meetings (Claimant & Respondent)
+            res["Travel (Prep & Hearing)"] += get_dist(t['city'], h_city) * 2 * t['size'] * FACTORS['transport'][t['mode']]
+            res["Hotel Stays"] += t['size'] * h_days * FACTORS['hotel'][t['stars']]
+    # Meeting travel
     if meetings:
         loc_cities = [teams[0]['city'], teams[1]['city'], teams[2]['city']]
         for i, m in enumerate(meetings):
             if m['count'] > 0:
-                target_city = loc_cities[i]
                 for j, t in enumerate(teams):
                     if i != j:
-                        dist = get_dist(t['city'], target_city)
-                        res["Scope 3: Travel"] += dist * 2 * m['count'] * t['size'] * FACTORS['transport'][t['mode']]
-                        res["Scope 3: Hotel Stays"] += t['size'] * m['days'] * FACTORS['hotel'][t['stars']]
+                        res["Travel (Prep & Hearing)"] += get_dist(t['city'], loc_cities[i]) * 2 * m['count'] * t['size'] * FACTORS['transport'][t['mode']]
+                        res["Hotel Stays"] += t['size'] * m['days'] * FACTORS['hotel'][t['stars']]
     return res
 
-# Run Calculations
-c_res = calculate_party("Claimant", [c_cli, c_cou, c_exp], [c_meet_cli, c_meet_cou, c_meet_exp], total_data * 0.4)
-r_res = calculate_party("Respondent", [r_cli, r_cou, r_exp], [r_meet_cli, r_meet_cou, r_meet_exp], total_data * 0.4)
-t_res = calculate_party("Tribunal", [arb1, arb2, arb3], None, total_data * 0.2)
+c_res = calculate_party([c_cli, c_cou, c_exp], [c_meet_cli, c_meet_cou, c_meet_exp], total_data * 0.4)
+r_res = calculate_party([r_cli, r_cou, r_exp], [r_meet_cli, r_meet_cou, r_meet_exp], total_data * 0.4)
+t_res = calculate_party([arb1, arb2, arb3], None, total_data * 0.2)
 
-# --- 4. EXCEL EXPORT LOGIC ---
-if st.button("Update Excel Template (Cells C30-C55)"):
+# --- 5. TOP-LEVEL SUMMARY DASHBOARD ---
+st.divider()
+col_sum1, col_sum2, col_sum3, col_sum4 = st.columns(4)
+c_total = sum(c_res.values())
+r_total = sum(r_res.values())
+t_total = sum(t_res.values())
+grand_total = c_total + r_total + t_total
+
+col_sum1.metric("GRAND TOTAL (kg)", f"{grand_total:,.1f}")
+col_sum2.metric("Claimant Total", f"{c_total:,.1f}")
+col_sum3.metric("Respondent Total", f"{r_total:,.1f}")
+col_sum4.metric("Tribunal Total", f"{t_total:,.1f}")
+
+# --- 6. EXCEL EXPORT (Triggered by Sidebar Button) ---
+if export_btn:
     try:
         wb = openpyxl.load_workbook('arbitration_tool.xlsx')
         sheet = wb.active
+        # Excel Mapping
+        sheet['C31'] = c_res["Digital (Comp/Data)"]
+        sheet['C32'] = total_data * FACTORS['data_gb']
+        # Split travel/hotel into the requested blocks
+        sheet['C40'], sheet['C41'] = c_res["Travel (Prep & Hearing)"]*0.3, c_res["Hotel Stays"]*0.3
+        sheet['C44'], sheet['C45'] = c_res["Travel (Prep & Hearing)"]*0.3, c_res["Hotel Stays"]*0.3
+        sheet['C48'], sheet['C49'] = c_res["Travel (Prep & Hearing)"]*0.4, c_res["Hotel Stays"]*0.4
         
-        # Digital Footprint
-        sheet['C31'] = c_res["Scope 2: Computer Use"] + c_res["Scope 3: Computer (Mfg/Ops)"]
-        sheet['C32'] = c_res["Scope 3: Data Storage"]
-
-        # Claimant Side Travel & Hotel Mapping (C40-C50)
-        # Using placeholder breakdown for the three meeting locations
-        sheet['C40'], sheet['C41'] = c_res["Scope 3: Travel"]*0.3, c_res["Scope 3: Hotel Stays"]*0.3
-        sheet['C44'], sheet['C45'] = c_res["Scope 3: Travel"]*0.3, c_res["Scope 3: Hotel Stays"]*0.3
-        sheet['C48'], sheet['C49'] = c_res["Scope 3: Travel"]*0.4, c_res["Scope 3: Hotel Stays"]*0.4
-
-        # Hearing Location (C52-C55)
-        if not is_virtual:
-            sheet['C52'] = sum(get_dist(t['city'], h_city) * 2 * t['size'] * FACTORS['transport'][t['mode']] for t in [c_cli, c_cou, c_exp])
-            sheet['C53'] = sum(t['size'] * h_days * FACTORS['hotel'][t['stars']] for t in [c_cli, c_cou, c_exp])
-
-        wb.save('Arbitration_Report_Updated.xlsx')
-        st.success("Successfully updated Arbitration_Report_Updated.xlsx")
+        wb.save('Arbitration_Report_Final.xlsx')
+        st.sidebar.success("Excel Updated!")
     except Exception as e:
+        st.sidebar.error(f"Excel Error: {str(e)}")
+
+# --- 7. VISUAL BREAKDOWNS ---
+st.header("Detailed Breakdown per Party")
+def display_party(name, data):
+    with st.expander(f"Show {name} Breakdown", expanded=True):
+        df = pd.DataFrame.from_dict(data, orient='index', columns=['kgCO2e'])
+        c1, c2 = st.columns([1, 2])
+        c1.table(df.style.format("{:,.2f}"))
+        c2.bar_chart(df)
+
+display_party("Claimant", c_res)
+display_party("Respondent", r_res)
+display_party("Tribunal", t_res)
