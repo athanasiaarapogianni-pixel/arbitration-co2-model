@@ -25,6 +25,7 @@ CITIES = ["Munich", "Madrid", "London", "Milan", "Frankfurt", "Paris", "Warsaw",
 
 def get_dist(origin, destination):
     if origin == destination: return 0
+    # Standardized distance placeholder
     return 850 
 
 # --- 2. SIDEBAR PARAMETERS ---
@@ -41,8 +42,8 @@ with st.sidebar:
         h_city, h_days = "Virtual", 0
     
     st.divider()
-    st.info("Complete all tabs, then click below to export:")
-    export_btn = st.button("💾 Update Excel Template (C30-C55)")
+    st.info("Complete all tabs, then click below to update your Excel template.")
+    export_btn = st.button("💾 Update Excel Template (C30-C97)")
 
 # --- 3. UI TABS ---
 st.title("⚖️ Professional Arbitration Carbon Impact Model")
@@ -51,7 +52,7 @@ tab_claimant, tab_respondent, tab_tribunal = st.tabs(["🔴 Claimant", "🔵 Res
 def subteam_inputs(label, prefix):
     st.markdown(f"**{label}**")
     c1, c2, c3, c4 = st.columns([1, 1.5, 1.5, 1])
-    size = c1.number_input("Size", value=2, key=f"{prefix}_sz", min_value=0)
+    size = c1.number_input("Size", value=2 if "Arbitrator" not in label else 1, key=f"{prefix}_sz", min_value=0)
     city = c2.selectbox("Base City", CITIES, key=f"{prefix}_ct")
     mode = c3.selectbox("Travel Mode", list(FACTORS['transport'].keys()), key=f"{prefix}_md")
     stars = c4.selectbox("Hotel", [3, 4, 5], index=1, key=f"{prefix}_st")
@@ -83,6 +84,7 @@ with tab_respondent:
     r_meet_exp = meeting_inputs("Expert Office", "r_m_exp")
 
 with tab_tribunal:
+    st.write("Arbitrators travel individually to the hearing location.")
     arb1 = subteam_inputs("Arbitrator 1", "t_a1")
     arb2 = subteam_inputs("Arbitrator 2", "t_a2")
     arb3 = subteam_inputs("Arbitrator 3", "t_a3")
@@ -100,7 +102,7 @@ def calculate_party(teams, meetings, data_share):
         for t in teams:
             res["Travel (Prep & Hearing)"] += get_dist(t['city'], h_city) * 2 * t['size'] * FACTORS['transport'][t['mode']]
             res["Hotel Stays"] += t['size'] * h_days * FACTORS['hotel'][t['stars']]
-    # Meeting travel
+    # Prep Meeting travel (Claimant/Respondent only)
     if meetings:
         loc_cities = [teams[0]['city'], teams[1]['city'], teams[2]['city']]
         for i, m in enumerate(meetings):
@@ -128,21 +130,45 @@ col_sum2.metric("Claimant Total", f"{c_total:,.1f}")
 col_sum3.metric("Respondent Total", f"{r_total:,.1f}")
 col_sum4.metric("Tribunal Total", f"{t_total:,.1f}")
 
-# --- 6. EXCEL EXPORT (Triggered by Sidebar Button) ---
+# --- 6. EXCEL EXPORT ---
 if export_btn:
     try:
         wb = openpyxl.load_workbook('arbitration_tool.xlsx')
         sheet = wb.active
-        # Excel Mapping
+
+        # Scope 3 Digital (Claimant as primary)
         sheet['C31'] = c_res["Digital (Comp/Data)"]
         sheet['C32'] = total_data * FACTORS['data_gb']
-        # Split travel/hotel into the requested blocks
+
+        # CLAIMANT (C40-C55)
         sheet['C40'], sheet['C41'] = c_res["Travel (Prep & Hearing)"]*0.3, c_res["Hotel Stays"]*0.3
         sheet['C44'], sheet['C45'] = c_res["Travel (Prep & Hearing)"]*0.3, c_res["Hotel Stays"]*0.3
         sheet['C48'], sheet['C49'] = c_res["Travel (Prep & Hearing)"]*0.4, c_res["Hotel Stays"]*0.4
-        
+        if not is_virtual:
+            sheet['C52'] = sum(get_dist(t['city'], h_city) * 2 * t['size'] * FACTORS['transport'][t['mode']] for t in [c_cli, c_cou, c_exp])
+            sheet['C53'] = sum(t['size'] * h_days * FACTORS['hotel'][t['stars']] for t in [c_cli, c_cou, c_exp])
+
+        # RESPONDENT (C70-C85)
+        sheet['C70'], sheet['C71'] = r_res["Travel (Prep & Hearing)"]*0.3, r_res["Hotel Stays"]*0.3
+        sheet['C74'], sheet['C75'] = r_res["Travel (Prep & Hearing)"]*0.3, r_res["Hotel Stays"]*0.3
+        sheet['C78'], sheet['C79'] = r_res["Travel (Prep & Hearing)"]*0.4, r_res["Hotel Stays"]*0.4
+        if not is_virtual:
+            sheet['C82'] = sum(get_dist(t['city'], h_city) * 2 * t['size'] * FACTORS['transport'][t['mode']] for t in [r_cli, r_cou, r_exp])
+            sheet['C83'] = sum(t['size'] * h_days * FACTORS['hotel'][t['stars']] for t in [r_cli, r_cou, r_exp])
+
+        # TRIBUNAL (C91-C97)
+        if not is_virtual:
+            # Arbitrator 1-3 Travel (C91, C92, C93)
+            sheet['C91'] = get_dist(arb1['city'], h_city) * 2 * arb1['size'] * FACTORS['transport'][arb1['mode']]
+            sheet['C92'] = get_dist(arb2['city'], h_city) * 2 * arb2['size'] * FACTORS['transport'][arb2['mode']]
+            sheet['C93'] = get_dist(arb3['city'], h_city) * 2 * arb3['size'] * FACTORS['transport'][arb3['mode']]
+            # Arbitrator 1-3 Stays (C95, C96, C97)
+            sheet['C95'] = arb1['size'] * h_days * FACTORS['hotel'][arb1['stars']]
+            sheet['C96'] = arb2['size'] * h_days * FACTORS['hotel'][arb2['stars']]
+            sheet['C97'] = arb3['size'] * h_days * FACTORS['hotel'][arb3['stars']]
+
         wb.save('Arbitration_Report_Final.xlsx')
-        st.sidebar.success("Excel Updated!")
+        st.sidebar.success("Excel Updated Successfully!")
     except Exception as e:
         st.sidebar.error(f"Excel Error: {str(e)}")
 
