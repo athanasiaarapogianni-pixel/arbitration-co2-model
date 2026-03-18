@@ -3,199 +3,194 @@ import pandas as pd
 import openpyxl
 import plotly.express as px
 
-# --- 1. SETUP & CORE DATA ---
-st.set_page_config(page_title="Arbitration CO2 Model", layout="wide")
+# --- 1. DATA LOADING ---
+@st.cache_data
+def load_excel_data():
+    file_path = "carbon_model.xlsx"
+    # Travel Matrix: City names in Row 1 and Column A
+    dist_df = pd.read_excel(file_path, sheet_name="Travel Matrix", index_col=0)
+    # List Selections: Columns B through H
+    hotel_df = pd.read_excel(file_path, sheet_name="List Selections", usecols="B:H")
+    return dist_df, hotel_df
 
-FACTORS = {
-    "comp_month": 6.4444, 
-    "hotel": {3: 15.5, 4: 21.7, 5: 35.2}, 
-    "data_gb": 0.021,
-    "materials": {"notebook": 0.37, "pen": 0.05},
-    "transport": {
-        "Plane (Business)": 0.274, "Plane (Economy)": 0.182,
-        "Rail": 0.035, "Car (non-electric)": 0.151, "Car (electric)": 0.055
-    }
-}
+# Sidebar - Refresh Logic
+if st.sidebar.button("🔄 Refresh Excel Data"):
+    st.cache_data.clear()
+    st.sidebar.success("Data Refreshed!")
 
-CITIES = ["Munich", "Madrid", "London", "Milan", "Frankfurt", "Paris", "Warsaw", "Geneva", "New York", "Singapore"]
+try:
+    dist_matrix, hotel_lookup = load_excel_data()
+    ALL_CITIES = sorted(dist_matrix.index.dropna().unique().tolist())
+except Exception as e:
+    st.error(f"Error loading Excel: {e}")
+    ALL_CITIES = ["London", "Paris", "New York", "Munich"]
 
-def get_dist(origin, destination):
-    if origin == destination: return 0
-    return 850 
+# --- 2. LOOKUP FUNCTIONS ---
+def get_matrix_dist(origin, destination):
+    try:
+        return float(dist_matrix.loc[origin, destination])
+    except:
+        return 850.0 # Fallback average
 
-# --- 2. SIDEBAR ---
+def get_hotel_factor(city, stars):
+    try:
+        # hotel_lookup loaded with usecols="B:H"
+        # Index 0 = B (Country)
+        # Index 1 = C (City)
+        # Index 2 = D (Empty/Misc)
+        # Index 3 = E (5-star)
+        # Index 4 = F (4-star)
+        # Index 5 = G (3-star)
+        # Index 6 = H (2-star)
+        
+        row = hotel_lookup[hotel_lookup.iloc[:, 1] == city]
+        
+        # Updated mapping based on your new Excel structure
+        star_col_map = {5: 3, 4: 4, 3: 5, 2: 6} 
+        
+        factor = row.iloc[0, star_col_map[stars]]
+        return float(factor)
+    except:
+        return 21.7 # Fallback average
+
+# --- 3. SIDEBAR PARAMETERS ---
 with st.sidebar:
     st.header("🌍 Global Case Parameters")
     case_months = st.number_input("Arbitration Duration (Months)", value=24)
     total_data = st.number_input("Total Data Generated (GB)", value=10)
     
     st.divider()
-    st.subheader("Hearing Settings")
     is_virtual = st.toggle("Virtual Hearing", value=False)
-    
     if not is_virtual:
-        h_city = st.selectbox("Hearing City", CITIES, index=5)
+        h_city = st.selectbox("Hearing City", ALL_CITIES, index=0)
         h_days = st.slider("Hearing Duration (Days)", 1, 21, 5)
     else:
         h_city, h_days = "Virtual", 0
-    
-    st.divider()
-    export_btn = st.button("💾 Sync to Excel (C30-C97)")
 
-# --- 3. UI TABS ---
-st.title("⚖️ Professional Arbitration Carbon Impact Model")
-tab_claimant, tab_respondent, tab_tribunal, tab_summary = st.tabs(["🔴 Claimant", "🔵 Respondent", "⚖️ Tribunal", "📊 Case Summary"])
+# --- 4. UI TABS ---
+st.title("⚖️ Professional Arbitration Carbon Model")
+tab_cl, tab_res, tab_trib, tab_sum = st.tabs(["🔴 Claimant", "🔵 Respondent", "⚖️ Tribunal", "📊 Case Summary"])
 
 def subteam_inputs(label, prefix):
     st.markdown(f"**{label}**")
     c1, c2, c3, c4 = st.columns([1, 1.5, 1.5, 1])
-    size = c1.number_input("Total Team Size", value=2 if "Arbitrator" not in label else 1, key=f"{prefix}_sz")
-    city = c2.selectbox("Base City", CITIES, key=f"{prefix}_ct")
-    mode = c3.selectbox("Default Travel Mode", list(FACTORS['transport'].keys()), key=f"{prefix}_md")
-    stars = c4.selectbox("Hotel Stars", [3, 4, 5], index=1, key=f"{prefix}_st")
+    size = c1.number_input("Size", value=2, key=f"{prefix}_sz", min_value=0)
+    city = c2.selectbox("Base City", ALL_CITIES, key=f"{prefix}_ct")
+    mode = c3.selectbox("Travel", ["Plane (Business)", "Plane (Economy)", "Rail", "Car"], key=f"{prefix}_md")
+    # Added 2-star option to dropdown
+    stars = c4.selectbox("Hotel", [5, 4, 3, 2], index=1, key=f"{prefix}_st")
     return {"size": size, "city": city, "mode": mode, "stars": stars}
 
 def meeting_matrix(label, prefix, teams):
     with st.expander(f"📅 Prep Meetings at {label}", expanded=False):
-        h1, h2, h3 = st.columns([2, 1, 1])
-        h1.caption("Sub-Team")
-        h2.caption("No. Travelers")
-        h3.caption("Nights Stayed")
         m_trips = []
         for i, team_name in enumerate(["Client Team", "Legal Counsel", "Experts"]):
             col1, col2, col3 = st.columns([2, 1, 1])
-            attend = col1.checkbox(f"{team_name}", key=f"{prefix}_att_{i}")
-            if attend:
-                count = col2.number_input("Qty", 1, 20, value=1, key=f"{prefix}_cnt_{i}", label_visibility="collapsed")
-                duration = col3.number_input("Nights", 1, 30, value=2, key=f"{prefix}_dur_{i}", label_visibility="collapsed")
-                m_trips.append({"team_idx": i, "count": count, "days": duration})
-        occurrences = st.number_input("Total meetings", 0, 20, value=1, key=f"{prefix}_occ")
+            if col1.checkbox(f"{team_name} travels", key=f"{prefix}_att_{i}"):
+                count = col2.number_input("Qty", 1, 20, value=1, key=f"{prefix}_cnt_{i}")
+                days = col3.number_input("Nights", 1, 30, value=2, key=f"{prefix}_dur_{i}")
+                m_trips.append({"idx": i, "count": count, "days": days})
+        occ = st.number_input("Total Meetings", 1, 20, value=1, key=f"{prefix}_occ")
         loc_city = teams[0]['city'] if "Client" in label else (teams[1]['city'] if "Counsel" in label else teams[2]['city'])
-        return {"trips": m_trips, "occurrences": occurrences, "loc_city": loc_city}
+        return {"trips": m_trips, "occ": occ, "loc": loc_city}
 
-# --- PILLARS ---
-with tab_claimant:
-    c_teams = [subteam_inputs("Client Team", "c_cli"), subteam_inputs("Legal Counsel", "c_cou"), subteam_inputs("Experts", "c_exp")]
-    st.divider()
-    c_m_list = [meeting_matrix("Claimant Office", "c_m1", c_teams), meeting_matrix("Counsel Chambers", "c_m2", c_teams), meeting_matrix("Expert Office", "c_m3", c_teams)]
+# --- 5. CALCULATION ENGINE ---
+TRANSPORT_FACTORS = {"Plane (Business)": 0.274, "Plane (Economy)": 0.182, "Rail": 0.035, "Car": 0.151}
 
-with tab_respondent:
-    r_teams = [subteam_inputs("Client Team", "r_cli"), subteam_inputs("Legal Counsel", "r_cou"), subteam_inputs("Experts", "r_exp")]
-    st.divider()
-    r_m_list = [meeting_matrix("Respondent Office", "r_m1", r_teams), meeting_matrix("Counsel Chambers", "r_m2", r_teams), meeting_matrix("Expert Office", "r_m3", r_teams)]
-
-with tab_tribunal:
-    arb_teams = [subteam_inputs(f"Arbitrator {i+1}", f"t_a{i+1}") for i in range(3)]
-
-# --- 4. CALCULATION ENGINE ---
-def calculate_output_standard(teams, meetings, data_share, virtual_override=False):
-    num_people = sum(t['size'] for t in teams)
-    comp_total = num_people * case_months * FACTORS['comp_month']
+def calculate_impact(teams, meetings, data_share, virtual_override=False):
+    num_ppl = sum(t['size'] for t in teams)
+    comp_total = num_ppl * case_months * 6.4444
+    
     res = {
         "Scope 2: Computer Use": comp_total * 0.15,
-        "Scope 2: Printing & Office Energy": num_people * 4.5,
+        "Scope 2: Printing & Office": num_ppl * 4.5,
         "Scope 3: Business Travel (Prep)": 0.0,
         "Scope 3: Business Travel (Hearing)": 0.0,
         "Scope 3: Hotel Stays": 0.0,
-        "Scope 3: Digital Storage & Manufacturing": (data_share * FACTORS['data_gb']) + (comp_total * 0.85),
-        "Scope 3: Materials & Stationery": num_people * (FACTORS['materials']['notebook'] + FACTORS['materials']['pen'])
+        "Scope 3: Digital Storage & Mfg": (data_share * 0.021) + (comp_total * 0.85),
+        "Scope 3: Materials": num_ppl * 0.42
     }
     
-    # Hearing (Only if NOT virtual)
     if not virtual_override and not is_virtual:
         for t in teams:
-            dist = get_dist(t['city'], h_city)
-            res["Scope 3: Business Travel (Hearing)"] += dist * 2 * t['size'] * FACTORS['transport'][t['mode']]
-            res["Scope 3: Hotel Stays"] += t['size'] * h_days * FACTORS['hotel'][t['stars']]
+            d = get_matrix_dist(t['city'], h_city)
+            h_fact = get_hotel_factor(h_city, t['stars'])
+            res["Scope 3: Business Travel (Hearing)"] += d * 2 * t['size'] * TRANSPORT_FACTORS[t['mode']]
+            res["Scope 3: Hotel Stays"] += t['size'] * h_days * h_fact
             
-    # Prep Meetings
     if meetings:
         for m in meetings:
             for trip in m['trips']:
-                origin_team = teams[trip['team_idx']]
-                dist = get_dist(origin_team['city'], m['loc_city'])
-                if dist > 0:
-                    res["Scope 3: Business Travel (Prep)"] += dist * 2 * trip['count'] * m['occurrences'] * FACTORS['transport'][origin_team['mode']]
-                    res["Scope 3: Hotel Stays"] += trip['count'] * trip['days'] * m['occurrences'] * FACTORS['hotel'][origin_team['stars']]
+                t = teams[trip['idx']]
+                d = get_matrix_dist(t['city'], m['loc'])
+                h_fact = get_hotel_factor(m['loc'], t['stars'])
+                if d > 0:
+                    res["Scope 3: Business Travel (Prep)"] += d * 2 * trip['count'] * m['occ'] * TRANSPORT_FACTORS[t['mode']]
+                    res["Scope 3: Hotel Stays"] += trip['count'] * trip['days'] * m['occ'] * h_fact
     return res
 
-# Calculate actual results
-c_res = calculate_output_standard(c_teams, c_m_list, total_data * 0.4)
-r_res = calculate_output_standard(r_teams, r_m_list, total_data * 0.4)
-t_res = calculate_output_standard(arb_teams, None, total_data * 0.2)
+# --- 6. EXECUTION ---
+with tab_cl:
+    c_t = [subteam_inputs("Client Team", "c_cli"), subteam_inputs("Legal Counsel", "c_cou"), subteam_inputs("Experts", "c_exp")]
+    st.divider()
+    c_m = [meeting_matrix("Client Office", "c1", c_t), meeting_matrix("Counsel Chambers", "c2", c_t), meeting_matrix("Expert Office", "c3", c_t)]
 
-# Calculate "What-if" Physical (to show savings if virtual is on)
-if is_virtual:
-    c_phys = calculate_output_standard(c_teams, c_m_list, total_data * 0.4, virtual_override=False)
-    r_phys = calculate_output_standard(r_teams, r_m_list, total_data * 0.4, virtual_override=False)
-    t_phys = calculate_output_standard(arb_teams, None, total_data * 0.2, virtual_override=False)
-    savings = (sum(c_phys.values()) + sum(r_phys.values()) + sum(t_phys.values())) - (sum(c_res.values()) + sum(r_res.values()) + sum(t_res.values()))
-else:
-    savings = 0
+with tab_res:
+    r_t = [subteam_inputs("Client Team", "r_cli"), subteam_inputs("Legal Counsel", "r_cou"), subteam_inputs("Experts", "r_exp")]
+    st.divider()
+    r_m = [meeting_matrix("Respondent Office", "r1", r_t), meeting_matrix("Counsel Chambers", "r2", r_t), meeting_matrix("Expert Office", "r3", r_t)]
 
-# --- 5. SUMMARY TAB ---
-with tab_summary:
-    st.header("🌳 Case Environmental Impact Summary")
-    c_total, r_total, t_total = sum(c_res.values()), sum(r_res.values()), sum(t_res.values())
+with tab_trib:
+    tr_t = [subteam_inputs(f"Arbitrator {i+1}", f"t_a{i}") for i in range(3)]
+
+c_res = calculate_impact(c_t, c_m, total_data * 0.4)
+r_res = calculate_impact(r_t, r_m, total_data * 0.4)
+tr_res = calculate_impact(tr_t, None, total_data * 0.2)
+
+# --- 7. SUMMARY TAB ---
+with tab_sum:
+    c_total, r_total, t_total = sum(c_res.values()), sum(r_res.values()), sum(tr_res.values())
     grand_total = c_total + r_total + t_total
     
-    num_cars_year = grand_total / 1.324287002
-    trees_needed = grand_total / 25
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Grand Total (kgCO2e)", f"{grand_total:,.1f}")
+    col2.metric("Equiv. Cars (Year)", f"{(grand_total/1.324287002):,.1f}")
+    col3.metric("Trees Required", f"{(grand_total/25):,.1f}")
     
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Grand Total Impact", f"{grand_total:,.1f} kgCO2e")
-    m2.metric("Equiv. Cars (per year)", f"{num_cars_year:,.1f}")
-    m3.metric("Trees Required", f"{trees_needed:,.1f}")
+    if is_virtual:
+        c_phys = calculate_impact(c_t, c_m, total_data * 0.4, virtual_override=False)
+        r_phys = calculate_impact(r_t, r_m, total_data * 0.4, virtual_override=False)
+        tr_phys = calculate_impact(tr_t, None, total_data * 0.2, virtual_override=False)
+        savings = (sum(c_phys.values()) + sum(r_phys.values()) + sum(tr_phys.values())) - grand_total
+        st.success(f"🌱 Conducted virtually: **{savings:,.1f} kgCO2e** avoided.")
 
-    if is_virtual and savings > 0:
-        st.success(f"🌱 **Virtual Hearing Benefit:** You are avoiding **{savings:,.1f} kgCO2e** by conducting this hearing virtually.")
-    
     st.divider()
     
-    combined_list = []
-    for party, data in [("Claimant", c_res), ("Respondent", r_res), ("Tribunal", t_res)]:
-        for cat, val in data.items():
-            combined_list.append({"Party": party, "Category": cat, "kgCO2e": val})
+    df_plot = []
+    for p, d in [("Claimant", c_res), ("Respondent", r_res), ("Tribunal", tr_res)]:
+        for cat, val in d.items():
+            df_plot.append({"Party": p, "Category": cat, "kgCO2e": val})
     
-    df_plot = pd.DataFrame(combined_list)
-    fig = px.bar(df_plot, x="Party", y="kgCO2e", color="Category", barmode="stack", title="Impact Breakdown")
+    fig = px.bar(pd.DataFrame(df_plot), x="Party", y="kgCO2e", color="Category", 
+                 barmode="stack", title="Impact by Category & Party",
+                 color_discrete_sequence=px.colors.qualitative.Pastel)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("📄 Case Report Preview")
-    report_text = f"""
-    ARBITRATION CARBON FOOTPRINT REPORT
-    ----------------------------------
-    Duration: {case_months} Months
-    Hearing Status: {'VIRTUAL' if is_virtual else 'PHYSICAL (' + h_city + ')'}
-    
-    TOTAL EMISSIONS: {grand_total:,.2f} kgCO2e
-    
-    BREAKDOWN:
-    - Claimant: {c_total:,.2f} kg
-    - Respondent: {r_total:,.2f} kg
-    - Tribunal: {t_total:,.2f} kg
-    
-    ENVIRONMENTAL EQUIVALENCY:
-    - This arbitration has the same impact as {num_cars_year:,.2f} average cars on the road for one year.
-    - {trees_needed:,.2f} mature trees would be required to offset this case.
-    """
-    st.code(report_text)
+    st.subheader("📋 Case Summary Report")
+    st.code(f"""
+ARBITRATION CARBON IMPACT SUMMARY
+----------------------------------
+Duration: {case_months} Months
+Hearing: {'VIRTUAL' if is_virtual else 'PHYSICAL - ' + h_city}
 
-# --- 6. EXCEL SYNC & INDIVIDUALS ---
-# [Excel logic remains same]
-if export_btn:
-    try:
-        wb = openpyxl.load_workbook('arbitration_tool.xlsx')
-        sheet = wb.active
-        sheet['C31'] = c_res["Scope 2: Computer Use"] + c_res["Scope 2: Printing & Office Energy"]
-        wb.save('Arbitration_Report_Final.xlsx')
-        st.sidebar.success("Excel Updated!")
-    except Exception as e: st.sidebar.error(f"Error: {e}")
+TOTAL CASE FOOTPRINT: {grand_total:,.1f} kgCO2e
 
-def display_breakdown(name, data):
-    with st.expander(f"Analysis: {name}"):
-        st.dataframe(pd.DataFrame.from_dict(data, orient='index', columns=['kgCO2e']).style.format("{:,.2f}"), use_container_width=True)
+EQUIVALENCIES:
+- Number of cars (1 year): {(grand_total/1.324287002):,.1f}
+- Trees to offset: {(grand_total/25):,.1f}
+    """)
 
-display_breakdown("Claimant Side", c_res)
-display_breakdown("Respondent Side", r_res)
-display_breakdown("Tribunal Side", t_res)
+# Expanders for raw data
+with st.expander("Claimant Detailed Table"): st.dataframe(pd.DataFrame.from_dict(c_res, orient='index'))
+with st.expander("Respondent Detailed Table"): st.dataframe(pd.DataFrame.from_dict(r_res, orient='index'))
+with st.expander("Tribunal Detailed Table"): st.dataframe(pd.DataFrame.from_dict(tr_res, orient='index'))
