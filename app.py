@@ -1,35 +1,25 @@
 import streamlit as st
 import pandas as pd
-import openpyxl
 import plotly.express as px
 import os
 
-# --- 1. DATA LOADING (Updated for C7 / D6 Mapping) ---
+# --- 1. DATA LOADING ---
 @st.cache_data
 def load_excel_data():
     file_path = "carbon_model.xlsx"
-    
     if not os.path.exists(file_path):
         return None, None
-
     try:
-        # header=5 tells Python that Row 6 (D6) contains the column names
-        # index_col=2 tells Python that Column C (index 2) contains the row names
+        # header=5 (Row 6) / index_col=2 (Col C)
         dist_df = pd.read_excel(file_path, sheet_name="Travel Matrix", header=5, index_col=2)
-        
-        # We drop any completely empty rows or columns that might be in the margins
         dist_df = dist_df.dropna(axis=0, how='all').dropna(axis=1, how='all')
-        
-        # Load Hotel Factors from 'List Selections' (B:H)
         hotel_df = pd.read_excel(file_path, sheet_name="List Selections", usecols="B:H")
-        
         return dist_df, hotel_df
     except Exception as e:
         st.error(f"Excel Loading Error: {e}")
         return None, None
 
-# Sidebar - Controls
-st.sidebar.header("🛠️ Data Controls")
+# Sidebar Refresh
 if st.sidebar.button("🔄 Refresh Excel Data"):
     st.cache_data.clear()
     st.rerun()
@@ -37,20 +27,15 @@ if st.sidebar.button("🔄 Refresh Excel Data"):
 dist_matrix, hotel_lookup = load_excel_data()
 
 if dist_matrix is not None:
-    # We filter out any 'Unnamed' artifacts from the Excel headers
     ALL_CITIES = sorted([c for c in dist_matrix.index.dropna().unique() if "Unnamed" not in str(c)])
-    st.sidebar.success(f"✅ Loaded {len(ALL_CITIES)} cities")
-    
     if st.sidebar.checkbox("👀 Preview Matrix Data"):
-        st.sidebar.write(dist_matrix.iloc[:5, :5]) # Show top-left 5x5 corner
+        st.sidebar.write(dist_matrix.iloc[:5, :5])
 else:
-    ALL_CITIES = ["London", "Paris", "New York"]
-    st.sidebar.warning("⚠️ Using Fallback Cities")
+    ALL_CITIES = ["London", "Paris", "Munich"]
 
 # --- 2. LOOKUP FUNCTIONS ---
 def get_matrix_dist(origin, destination):
     try:
-        # We ensure names are strings and stripped of whitespace
         val = dist_matrix.loc[str(origin).strip(), str(destination).strip()]
         return float(val)
     except:
@@ -58,14 +43,13 @@ def get_matrix_dist(origin, destination):
 
 def get_hotel_factor(city, stars):
     try:
-        # Col C (Index 1) is City. Col E,F,G,H (Index 3,4,5,6) are star ratings.
         row = hotel_lookup[hotel_lookup.iloc[:, 1].str.strip() == str(city).strip()]
         star_col_map = {5: 3, 4: 4, 3: 5, 2: 6} 
         return float(row.iloc[0, star_col_map[stars]])
     except:
         return 21.7 
 
-# --- 3. SIDEBAR PARAMETERS ---
+# --- 3. SIDEBAR ---
 with st.sidebar:
     st.header("🌍 Global Parameters")
     case_months = st.number_input("Case Duration (Months)", value=24)
@@ -78,7 +62,7 @@ with st.sidebar:
     else:
         h_city, h_days = "Virtual", 0
 
-# --- 4. UI TABS ---
+# --- 4. TABS ---
 st.title("⚖️ Professional Arbitration Carbon Model")
 t_cl, t_res, t_trib, t_sum = st.tabs(["🔴 Claimant", "🔵 Respondent", "⚖️ Tribunal", "📊 Case Summary"])
 
@@ -104,26 +88,30 @@ def meeting_matrix(label, prefix, teams):
         loc_city = teams[0]['city'] if "Client" in label else (teams[1]['city'] if "Counsel" in label else teams[2]['city'])
         return {"trips": m_trips, "occ": occ, "loc": loc_city}
 
-# --- 5. CALCULATION ENGINE ---
+# --- 5. CALCULATION ENGINE (Standardized Keys) ---
 TRANSPORT = {"Plane (Business)": 0.274, "Plane (Economy)": 0.182, "Rail": 0.035, "Car": 0.151}
 
 def calculate_impact(teams, meetings, data_share, virtual_override=False):
     num_ppl = sum(t['size'] for t in teams)
     comp_total = num_ppl * case_months * 6.4444
+    
+    # CRITICAL: These keys must match the update lines below exactly
     res = {
         "Scope 2: Computer Use": comp_total * 0.15,
         "Scope 2: Printing & Office": num_ppl * 4.5,
-        "Scope 3: Business Travel (Prep)": 0.0,
-        "Scope 3: Business Travel (Hearing)": 0.0,
+        "Scope 3: Travel (Prep)": 0.0,
+        "Scope 3: Travel (Hearing)": 0.0,
         "Scope 3: Hotel Stays": 0.0,
         "Scope 3: Digital Storage & Mfg": (data_share * 0.021) + (comp_total * 0.85),
         "Scope 3: Materials": num_ppl * 0.42
     }
+    
     if not virtual_override and not is_virtual and h_city != "Virtual":
         for t in teams:
             d = get_matrix_dist(t['city'], h_city)
-            res["Scope 3: Business Travel (Hearing)"] += d * 2 * t['size'] * TRANSPORT[t['mode']]
+            res["Scope 3: Travel (Hearing)"] += d * 2 * t['size'] * TRANSPORT[t['mode']]
             res["Scope 3: Hotel Stays"] += t['size'] * h_days * get_hotel_factor(h_city, t['stars'])
+            
     if meetings:
         for m in meetings:
             for trip in m['trips']:
@@ -144,7 +132,9 @@ with t_res:
 with t_trib:
     tr_t = [subteam_inputs(f"Arbitrator {i+1}", f"t_a{i}") for i in range(3)]
 
-c_res, r_res, tr_res = calculate_impact(c_t, c_m, total_data*0.4), calculate_impact(r_t, r_m, total_data*0.4), calculate_impact(tr_t, None, total_data*0.2)
+c_res = calculate_impact(c_t, c_m, total_data*0.4)
+r_res = calculate_impact(r_t, r_m, total_data*0.4)
+tr_res = calculate_impact(tr_t, None, total_data*0.2)
 
 # --- 7. SUMMARY ---
 with t_sum:
@@ -154,14 +144,12 @@ with t_sum:
     c2.metric("Equiv. Cars (Year)", f"{(grand/1.324287002):,.1f}")
     c3.metric("Trees Required", f"{(grand/25):,.1f}")
     
-    st.divider()
-    
     df_plot = []
     for party, data in [("Claimant", c_res), ("Respondent", r_res), ("Tribunal", tr_res)]:
         for cat, val in data.items():
             df_plot.append({"Party": party, "Category": cat, "kgCO2e": val})
     
-    st.plotly_chart(px.bar(pd.DataFrame(df_plot), x="Party", y="kgCO2e", color="Category", barmode="stack", title="Impact by Category"), use_container_width=True)
+    st.plotly_chart(px.bar(pd.DataFrame(df_plot), x="Party", y="kgCO2e", color="Category", barmode="stack"), use_container_width=True)
 
     h_display = "VIRTUAL" if is_virtual else (f"PHYSICAL - {h_city}" if h_city else "NOT SELECTED")
     st.code(f"TOTAL FOOTPRINT: {grand:,.2f} kgCO2e\nHearing: {h_display}\nCars/Year: {(grand/1.324287002):,.2f}\nTrees: {(grand/25):,.2f}")
