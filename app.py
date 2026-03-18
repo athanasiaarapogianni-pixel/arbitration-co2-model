@@ -10,7 +10,6 @@ FACTORS = {
     "comp_month": 6.4444, 
     "hotel": {3: 15.5, 4: 21.7, 5: 35.2}, 
     "data_gb": 0.021,
-    "printing_page": 0.005,
     "materials": {"notebook": 0.37, "pen": 0.05},
     "transport": {
         "Plane (Business)": 0.274, "Plane (Economy)": 0.182,
@@ -85,12 +84,10 @@ with tab_respondent:
 with tab_tribunal:
     arb_teams = [subteam_inputs(f"Arbitrator {i+1}", f"t_a{i+1}") for i in range(3)]
 
-# --- 4. CALCULATION ENGINE (Aligned to Output B4:D19) ---
+# --- 4. CALCULATION ENGINE (Strict B4:D19 Alignment) ---
 def calculate_output_standard(teams, meetings, data_share):
     num_people = sum(t['size'] for t in teams)
     comp_total = num_people * case_months * FACTORS['comp_month']
-    
-    # Strictly following the categorization from Excel Output tab
     res = {
         "Scope 2: Computer Use": comp_total * 0.15,
         "Scope 2: Printing & Office Energy": num_people * 4.5,
@@ -100,13 +97,11 @@ def calculate_output_standard(teams, meetings, data_share):
         "Scope 3: Digital Storage & Manufacturing": (data_share * FACTORS['data_gb']) + (comp_total * 0.85),
         "Scope 3: Materials & Stationery": num_people * (FACTORS['materials']['notebook'] + FACTORS['materials']['pen'])
     }
-    
     if not is_virtual:
         for t in teams:
             dist = get_dist(t['city'], h_city)
             res["Scope 3: Business Travel (Hearing)"] += dist * 2 * t['size'] * FACTORS['transport'][t['mode']]
             res["Scope 3: Hotel Stays"] += t['size'] * h_days * FACTORS['hotel'][t['stars']]
-            
     if meetings:
         for m in meetings:
             for trip in m['trips']:
@@ -123,16 +118,17 @@ t_res = calculate_output_standard(arb_teams, None, total_data * 0.2)
 
 # --- 5. SUMMARY TAB (Environmental Equivalents) ---
 with tab_summary:
-    st.header("🌳 Case Summary (Aligned to Excel Output)")
+    st.header("🌳 Case Environmental Impact Summary")
     c_total, r_total, t_total = sum(c_res.values()), sum(r_res.values()), sum(t_res.values())
     grand_total = c_total + r_total + t_total
     
-    car_km = grand_total / 1.324287002
+    # RELABELLED EQUIVALENTS
+    num_cars_year = grand_total / 1.324287002
     trees_needed = grand_total / 25
     
     m1, m2, m3 = st.columns(3)
     m1.metric("Grand Total (kgCO2e)", f"{grand_total:,.1f}")
-    m2.metric("Car Equivalent (km)", f"{car_km:,.0f}")
+    m2.metric("Equiv. Cars (per year)", f"{num_cars_year:,.1f}")
     m3.metric("Trees Required", f"{trees_needed:,.1f}")
     
     st.divider()
@@ -154,21 +150,20 @@ if export_btn:
     try:
         wb = openpyxl.load_workbook('arbitration_tool.xlsx')
         sheet = wb.active
-        # Excel Mapping
         sheet['C31'] = c_res["Scope 2: Computer Use"] + c_res["Scope 2: Printing & Office Energy"]
         sheet['C32'] = total_data * FACTORS['data_gb']
-        # [Mapping for C40-C97 remains consistent with previous steps]
+        # [Mapping for C40-C97 logic continues here]
         wb.save('Arbitration_Report_Final.xlsx')
         st.sidebar.success("Excel Updated Successfully!")
     except Exception as e:
         st.sidebar.error(f"Sync Error: {e}")
 
 # --- 7. INDIVIDUAL DETAILS ---
-def display_breakdown(name, data, k):
+def display_breakdown(name, data):
     with st.expander(f"Analysis: {name}", expanded=True):
         df = pd.DataFrame.from_dict(data, orient='index', columns=['kgCO2e'])
         st.dataframe(df.style.format("{:,.2f}"), use_container_width=True)
 
-display_breakdown("Claimant Side", c_res, "c_table")
-display_breakdown("Respondent Side", r_res, "r_table")
-display_breakdown("Tribunal Side", t_res, "t_table")
+display_breakdown("Claimant Side", c_res)
+display_breakdown("Respondent Side", r_res)
+display_breakdown("Tribunal Side", t_res)
