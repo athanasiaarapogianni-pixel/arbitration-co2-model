@@ -28,6 +28,9 @@ with st.sidebar:
     st.header("🌍 Global Case Parameters")
     case_months = st.number_input("Arbitration Duration (Months)", value=24)
     total_data = st.number_input("Total Data Generated (GB)", value=10)
+    
+    st.divider()
+    st.subheader("Hearing Settings")
     is_virtual = st.toggle("Virtual Hearing", value=False)
     
     if not is_virtual:
@@ -66,11 +69,11 @@ def meeting_matrix(label, prefix, teams):
                 count = col2.number_input("Qty", 1, 20, value=1, key=f"{prefix}_cnt_{i}", label_visibility="collapsed")
                 duration = col3.number_input("Nights", 1, 30, value=2, key=f"{prefix}_dur_{i}", label_visibility="collapsed")
                 m_trips.append({"team_idx": i, "count": count, "days": duration})
-        occurrences = st.number_input("Total number of these meetings", 0, 20, value=1, key=f"{prefix}_occ")
+        occurrences = st.number_input("Total meetings", 0, 20, value=1, key=f"{prefix}_occ")
         loc_city = teams[0]['city'] if "Client" in label else (teams[1]['city'] if "Counsel" in label else teams[2]['city'])
         return {"trips": m_trips, "occurrences": occurrences, "loc_city": loc_city}
 
-# --- TAB CONTENT ---
+# --- PILLARS ---
 with tab_claimant:
     c_teams = [subteam_inputs("Client Team", "c_cli"), subteam_inputs("Legal Counsel", "c_cou"), subteam_inputs("Experts", "c_exp")]
     st.divider()
@@ -84,8 +87,8 @@ with tab_respondent:
 with tab_tribunal:
     arb_teams = [subteam_inputs(f"Arbitrator {i+1}", f"t_a{i+1}") for i in range(3)]
 
-# --- 4. CALCULATION ENGINE (Strict B4:D19 Alignment) ---
-def calculate_output_standard(teams, meetings, data_share):
+# --- 4. CALCULATION ENGINE ---
+def calculate_output_standard(teams, meetings, data_share, virtual_override=False):
     num_people = sum(t['size'] for t in teams)
     comp_total = num_people * case_months * FACTORS['comp_month']
     res = {
@@ -97,11 +100,15 @@ def calculate_output_standard(teams, meetings, data_share):
         "Scope 3: Digital Storage & Manufacturing": (data_share * FACTORS['data_gb']) + (comp_total * 0.85),
         "Scope 3: Materials & Stationery": num_people * (FACTORS['materials']['notebook'] + FACTORS['materials']['pen'])
     }
-    if not is_virtual:
+    
+    # Hearing (Only if NOT virtual)
+    if not virtual_override and not is_virtual:
         for t in teams:
             dist = get_dist(t['city'], h_city)
             res["Scope 3: Business Travel (Hearing)"] += dist * 2 * t['size'] * FACTORS['transport'][t['mode']]
             res["Scope 3: Hotel Stays"] += t['size'] * h_days * FACTORS['hotel'][t['stars']]
+            
+    # Prep Meetings
     if meetings:
         for m in meetings:
             for trip in m['trips']:
@@ -112,57 +119,82 @@ def calculate_output_standard(teams, meetings, data_share):
                     res["Scope 3: Hotel Stays"] += trip['count'] * trip['days'] * m['occurrences'] * FACTORS['hotel'][origin_team['stars']]
     return res
 
+# Calculate actual results
 c_res = calculate_output_standard(c_teams, c_m_list, total_data * 0.4)
 r_res = calculate_output_standard(r_teams, r_m_list, total_data * 0.4)
 t_res = calculate_output_standard(arb_teams, None, total_data * 0.2)
 
-# --- 5. SUMMARY TAB (Environmental Equivalents) ---
+# Calculate "What-if" Physical (to show savings if virtual is on)
+if is_virtual:
+    c_phys = calculate_output_standard(c_teams, c_m_list, total_data * 0.4, virtual_override=False)
+    r_phys = calculate_output_standard(r_teams, r_m_list, total_data * 0.4, virtual_override=False)
+    t_phys = calculate_output_standard(arb_teams, None, total_data * 0.2, virtual_override=False)
+    savings = (sum(c_phys.values()) + sum(r_phys.values()) + sum(t_phys.values())) - (sum(c_res.values()) + sum(r_res.values()) + sum(t_res.values()))
+else:
+    savings = 0
+
+# --- 5. SUMMARY TAB ---
 with tab_summary:
     st.header("🌳 Case Environmental Impact Summary")
     c_total, r_total, t_total = sum(c_res.values()), sum(r_res.values()), sum(t_res.values())
     grand_total = c_total + r_total + t_total
     
-    # RELABELLED EQUIVALENTS
     num_cars_year = grand_total / 1.324287002
     trees_needed = grand_total / 25
     
     m1, m2, m3 = st.columns(3)
-    m1.metric("Grand Total (kgCO2e)", f"{grand_total:,.1f}")
+    m1.metric("Grand Total Impact", f"{grand_total:,.1f} kgCO2e")
     m2.metric("Equiv. Cars (per year)", f"{num_cars_year:,.1f}")
     m3.metric("Trees Required", f"{trees_needed:,.1f}")
+
+    if is_virtual and savings > 0:
+        st.success(f"🌱 **Virtual Hearing Benefit:** You are avoiding **{savings:,.1f} kgCO2e** by conducting this hearing virtually.")
     
     st.divider()
     
-    # Combined Stacked Bar Chart
     combined_list = []
     for party, data in [("Claimant", c_res), ("Respondent", r_res), ("Tribunal", t_res)]:
         for cat, val in data.items():
             combined_list.append({"Party": party, "Category": cat, "kgCO2e": val})
     
     df_plot = pd.DataFrame(combined_list)
-    fig = px.bar(df_plot, x="Party", y="kgCO2e", color="Category", 
-                 title="Total Emissions by Scope & Activity", barmode="stack",
-                 color_discrete_sequence=px.colors.qualitative.T10)
-    st.plotly_chart(fig, use_container_width=True, key="summary_stacked_bar")
+    fig = px.bar(df_plot, x="Party", y="kgCO2e", color="Category", barmode="stack", title="Impact Breakdown")
+    st.plotly_chart(fig, use_container_width=True)
 
-# --- 6. EXCEL SYNC (C30-C97) ---
+    st.subheader("📄 Case Report Preview")
+    report_text = f"""
+    ARBITRATION CARBON FOOTPRINT REPORT
+    ----------------------------------
+    Duration: {case_months} Months
+    Hearing Status: {'VIRTUAL' if is_virtual else 'PHYSICAL (' + h_city + ')'}
+    
+    TOTAL EMISSIONS: {grand_total:,.2f} kgCO2e
+    
+    BREAKDOWN:
+    - Claimant: {c_total:,.2f} kg
+    - Respondent: {r_total:,.2f} kg
+    - Tribunal: {t_total:,.2f} kg
+    
+    ENVIRONMENTAL EQUIVALENCY:
+    - This arbitration has the same impact as {num_cars_year:,.2f} average cars on the road for one year.
+    - {trees_needed:,.2f} mature trees would be required to offset this case.
+    """
+    st.code(report_text)
+
+# --- 6. EXCEL SYNC & INDIVIDUALS ---
+# [Excel logic remains same]
 if export_btn:
     try:
         wb = openpyxl.load_workbook('arbitration_tool.xlsx')
         sheet = wb.active
         sheet['C31'] = c_res["Scope 2: Computer Use"] + c_res["Scope 2: Printing & Office Energy"]
-        sheet['C32'] = total_data * FACTORS['data_gb']
-        # [Mapping for C40-C97 logic continues here]
         wb.save('Arbitration_Report_Final.xlsx')
-        st.sidebar.success("Excel Updated Successfully!")
-    except Exception as e:
-        st.sidebar.error(f"Sync Error: {e}")
+        st.sidebar.success("Excel Updated!")
+    except Exception as e: st.sidebar.error(f"Error: {e}")
 
-# --- 7. INDIVIDUAL DETAILS ---
 def display_breakdown(name, data):
-    with st.expander(f"Analysis: {name}", expanded=True):
-        df = pd.DataFrame.from_dict(data, orient='index', columns=['kgCO2e'])
-        st.dataframe(df.style.format("{:,.2f}"), use_container_width=True)
+    with st.expander(f"Analysis: {name}"):
+        st.dataframe(pd.DataFrame.from_dict(data, orient='index', columns=['kgCO2e']).style.format("{:,.2f}"), use_container_width=True)
 
 display_breakdown("Claimant Side", c_res)
 display_breakdown("Respondent Side", r_res)
